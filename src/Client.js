@@ -351,63 +351,98 @@
             }
         }
 
-        function invokeHandler(name, args, context) {
+        function originInvokeHandler(resolve, reject, param) {
+            var name = param.name,
+                args = param.args,
+                context = param.context;
             var request = encode(name, args, context);
             request.writeByte(Tags.TagEnd);
-            return Future.promise(function(resolve, reject) {
-                sendAndReceive(request.bytes, context, function(response) {
-                    if (context.oneway) {
-                        resolve();
-                        return;
+            sendAndReceive(request.bytes, context, function (response) {
+                if (context.oneway) {
+                    resolve();
+                    return;
+                }
+                var result = null;
+                var error = null;
+                try {
+                    if (context.mode === ResultMode.RawWithEndTag) {
+                        result = response;
                     }
-                    var result = null;
-                    var error = null;
-                    try {
-                        if (context.mode === ResultMode.RawWithEndTag) {
-                            result = response;
-                        }
-                        else if (context.mode === ResultMode.Raw) {
-                            result = response.subarray(0, response.byteLength - 1);
-                        }
-                        else {
-                            var stream = new BytesIO(response);
-                            var reader = new Reader(stream, false, context.useHarmonyMap);
-                            var tag = stream.readByte();
-                            if (tag === Tags.TagResult) {
-                                if (context.mode === ResultMode.Serialized) {
-                                    result = reader.readRaw();
-                                }
-                                else {
-                                    result = reader.unserialize();
-                                }
-                                tag = stream.readByte();
-                                if (tag === Tags.TagArgument) {
-                                    reader.reset();
-                                    var _args = reader.readList();
-                                    copyargs(_args, args);
-                                    tag = stream.readByte();
-                                }
-                            }
-                            else if (tag === Tags.TagError) {
-                                error = new Error(reader.readString());
-                                tag = stream.readByte();
-                            }
-                            if (tag !== Tags.TagEnd) {
-                                error = new Error('Wrong Response:\r\n' + BytesIO.toString(response));
-                            }
-                        }
-                    }
-                    catch (e) {
-                        error = e;
-                    }
-                    if (error) {
-                        reject(error);
+                    else if (context.mode === ResultMode.Raw) {
+                        result = response.subarray(0, response.byteLength - 1);
                     }
                     else {
-                        resolve(result);
+                        var stream = new BytesIO(response);
+                        var reader = new Reader(stream, false, context.useHarmonyMap);
+                        var tag = stream.readByte();
+                        if (tag === Tags.TagResult) {
+                            if (context.mode === ResultMode.Serialized) {
+                                result = reader.readRaw();
+                            }
+                            else {
+                                result = reader.unserialize();
+                            }
+                            tag = stream.readByte();
+                            if (tag === Tags.TagArgument) {
+                                reader.reset();
+                                var _args = reader.readList();
+                                copyargs(_args, args);
+                                tag = stream.readByte();
+                            }
+                        }
+                        else if (tag === Tags.TagError) {
+                            error = new Error(reader.readString());
+                            tag = stream.readByte();
+                        }
+                        if (tag !== Tags.TagEnd) {
+                            error = new Error('Wrong Response:\r\n' + BytesIO.toString(response));
+                        }
                     }
-                }, reject);
-            });
+                    if(error){
+                        throw error;
+                    }
+                }
+                catch (e) {
+                    error = e;
+                }
+                if (error) {
+                    reject(error, param);
+                } else {
+                    resolve(result, param);
+                }
+            }, reject);
+        }
+
+        function invokeHandler(name, args, context) {
+            if (args.length > 0 && args[args.length - 1] && typeof(args[args.length - 1].handler) == "function") {
+                return Future.promise(function (resolve, reject) {
+                    var udata = args[args.length - 1];
+                    var param = {
+                        name: name, args: args.slice(0, args.length - 1),
+                        udata: udata, invoke: originInvokeHandler, context: context
+                    };
+                    for(var prop in udata) {
+                        if(prop != "handler" && udata.hasOwnProperty(prop)) {
+                            param[prop] = udata[prop];
+                        }
+                    }
+                    udata.handler(param, resolve, reject);
+                });
+            } else if(typeof(global.hprose.userdefInvoke) == "function"){
+                return Future.promise(function(resolve, reject){
+                    var param = {
+                        name: name, args: args,
+                        udata: null, invoke: originInvokeHandler, context: context
+                    };
+
+                    global.hprose.userdefInvoke(param, resolve, reject);
+                });
+            } else {
+                return Future.promise(function (resolve, reject) {
+                    var param = {name:name, args: args, context:context};
+                    originInvokeHandler(resolve, reject, param);
+                });
+            }
         }
 
         function unlock(sync) {
